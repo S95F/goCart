@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GoCart — Multiplayer Racing</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+    }
+
+    /* ── Menu ── */
+    #menu {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 20px;
+      background: radial-gradient(ellipse at center, #1a1a2e 0%, #0a0a0a 100%);
+    }
+
+    #menu h1 {
+      font-size: 5rem;
+      font-weight: 900;
+      letter-spacing: -2px;
+      background: linear-gradient(135deg, #f39c12, #e74c3c);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-shadow: none;
+    }
+
+    #menu p.sub {
+      color: #888;
+      font-size: 1.1rem;
+      margin-top: -12px;
+    }
+
+    #nameInput {
+      padding: 14px 24px;
+      font-size: 1.1rem;
+      border: 2px solid #444;
+      border-radius: 8px;
+      background: #1a1a1a;
+      color: #fff;
+      width: 300px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    #nameInput:focus { border-color: #e74c3c; }
+
+    #joinBtn {
+      padding: 14px 48px;
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #e74c3c, #c0392b);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      transition: transform .1s, box-shadow .1s;
+      box-shadow: 0 4px 20px rgba(231,76,60,.4);
+    }
+    #joinBtn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(231,76,60,.5); }
+    #joinBtn:active { transform: translateY(0); }
+
+    .controls-hint {
+      margin-top: 8px;
+      color: #555;
+      font-size: 0.85rem;
+      text-align: center;
+      line-height: 1.7;
+    }
+    .key {
+      display: inline-block;
+      background: #222;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: monospace;
+      font-size: .8rem;
+      color: #ccc;
+    }
+
+    /* ── Game canvas ── */
+    #gameContainer {
+      display: none;
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #gameContainer canvas {
+      display: block;
+    }
+
+    /* ── HUD ── */
+    #hud {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+    }
+
+    #speedometer {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      text-align: right;
+    }
+    #speedValue {
+      font-size: 3.5rem;
+      font-weight: 900;
+      line-height: 1;
+      color: #fff;
+      text-shadow: 0 0 20px rgba(255,255,255,.3);
+    }
+    #speedUnit {
+      font-size: .9rem;
+      color: #aaa;
+      letter-spacing: 2px;
+    }
+
+    #lapInfo {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+    }
+    #lapDisplay {
+      font-size: 1.4rem;
+      font-weight: 700;
+      background: rgba(0,0,0,.55);
+      padding: 8px 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,.15);
+    }
+
+    #positionBadge {
+      position: absolute;
+      top: 20px;
+      right: 24px;
+      background: rgba(0,0,0,.55);
+      padding: 8px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.15);
+      text-align: center;
+    }
+    #posOrdinal { font-size: 2.2rem; font-weight: 900; line-height: 1; }
+    #posSuffix  { font-size: .9rem; color: #aaa; }
+
+    #minimap {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.2);
+      overflow: hidden;
+    }
+
+    #toast {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 2.5rem;
+      font-weight: 900;
+      color: #f1c40f;
+      text-shadow: 0 2px 12px rgba(0,0,0,.8);
+      opacity: 0;
+      transition: opacity .3s;
+      pointer-events: none;
+      text-align: center;
+    }
+
+    #boostBar {
+      position: absolute;
+      bottom: 80px;
+      right: 24px;
+      width: 8px;
+      height: 80px;
+      background: rgba(255,255,255,.1);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #boostFill {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(180deg, #3498db, #1abc9c);
+      transition: height .1s;
+    }
+
+    #playerList {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0,0,0,.55);
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.1);
+      font-size: .82rem;
+      min-width: 140px;
+    }
+    #playerList h3 { font-size: .7rem; letter-spacing: 2px; color: #888; margin-bottom: 6px; text-transform: uppercase; }
+    .pl-entry { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+    .pl-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .pl-name { color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+    .pl-lap  { color: #888; margin-left: auto; font-size: .75rem; }
+  </style>
+</head>
+<body>
+
+<!-- ── Menu ── -->
+<div id="menu">
+  <h1>GoCart</h1>
+  <p class="sub">Multiplayer Racing</p>
+  <input id="nameInput" type="text" placeholder="Your name" maxlength="16" autocomplete="off" />
+  <button id="joinBtn">START RACE</button>
+  <div class="controls-hint">
+    <span class="key">W</span> / <span class="key">↑</span> Accelerate &nbsp;
+    <span class="key">S</span> / <span class="key">↓</span> Brake &nbsp;
+    <span class="key">A</span><span class="key">D</span> / <span class="key">←</span><span class="key">→</span> Steer<br/>
+    <span class="key">Shift</span> Boost
+  </div>
+</div>
+
+<!-- ── Game ── -->
+<div id="gameContainer">
+  <div id="hud">
+    <div id="playerList"><h3>Racers</h3><div id="plEntries"></div></div>
+    <div id="lapInfo"><div id="lapDisplay">LAP 1 / 3</div></div>
+    <div id="positionBadge"><div id="posOrdinal">1</div><div id="posSuffix">ST</div></div>
+    <div id="speedometer">
+      <div id="speedValue">0</div>
+      <div id="speedUnit">KM/H</div>
+    </div>
+    <div id="boostBar"><div id="boostFill" style="height:100%"></div></div>
+    <canvas id="minimap" width="140" height="140"></canvas>
+    <div id="toast"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/static/game.js"></script>
+</body>
+</html>
