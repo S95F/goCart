@@ -1,0 +1,41 @@
+{
+  "name": "gocart",
+  "repo_path": "gocart",
+  "clone_url": "https://github.com/S95F/goCart.git",
+  "branch": "claude/go-kart-multiplayer-backend-P1ZIo",
+  "remote": "origin",
+  "git_env": [],
+  "auto_update_enabled": false,
+  "auto_update_minutes": 15,
+
+  "auto_build_enabled": true,
+  "build_command": "go",
+  "build_args": ["build", "-o", "gocart", "."],
+
+  "app_port": 8080,
+  "port_flag": "-port",
+
+  "service_manage_enabled": true,
+  "service_name": "gocart",
+  "service_scope": "system",
+  "service_description": "GoCart multiplayer racing server",
+  "service_user": "deploy",
+  "service_env": [],
+  "service_restart": "on-failure",
+
+  "caddy_enabled": true,
+  "caddy_auto_apply": true,
+  "caddy_mode": "proxy",
+  "caddy_domain": "gocart.example.com",
+  "caddy_upstream": "127.0.0.1:{port}",
+  "caddy_root": "",
+  "caddy_browse": false,
+  "caddy_try_files": "",
+  "caddy_extra": "encode zstd gzip",
+  "caddy_snippet_dir": "/etc/caddy/sites.d",
+  "caddy_reload_command": ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
+  "caddy_files_user": "caddy",
+  "caddy_files_group": "caddy",
+  "caddy_files_dir_mode": "0755",
+  "caddy_files_file_mode": "0644"
+}
