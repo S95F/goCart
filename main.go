@@ -22,9 +22,9 @@ func main() {
 	}
 
 	hub := NewHub()
-	go hub.Run()
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	http.Handle("/models/", http.StripPrefix("/models/", http.FileServer(http.Dir("models"))))
 	http.HandleFunc("/ws", hub.ServeWS)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "static/index.html")

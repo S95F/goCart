@@ -1,76 +1,214 @@
 /* =========================================================
    GoCart — Three.js multiplayer racing frontend
    Connects to the Go WebSocket backend for authoritative physics.
+   Karts are cloned from a single GLB and tinted per player.
    ========================================================= */
 
 'use strict';
 
 // ── Track constants (must match server player.go) ──
-const INNER_R   = 55;
-const OUTER_R   = 85;
-const MID_R     = (INNER_R + OUTER_R) / 2;   // 70
+const INNER_R    = 55;
+const OUTER_R    = 85;
+const MID_R      = (INNER_R + OUTER_R) / 2;
 const TOTAL_LAPS = 3;
 
 // ── Lerp speed for remote player interpolation ──
 const LERP_POS = 0.25;
 const LERP_ROT = 0.25;
 
-// ── Ordinal suffixes ──
 const SUFFIXES = ['TH','ST','ND','RD','TH','TH','TH','TH','TH','TH'];
 
 // ── Global state ──
 let scene, camera, renderer, clock;
-let myId   = null;
-let ws     = null;
-let boostCharge = 1.0; // 0-1
+let myId       = null;
+let myColor    = null;
+let lobbyCode  = null;
+let lobbyPriv  = false;
+let ws         = null;
+let boostCharge = 1.0;
+let kartTemplate = null;     // cached GLB scene used as a clone source
+let threeReady   = false;    // initThree() has run
+let toastTimer   = null;
+let pendingJoinName = null;  // sent once WS opens
 
-const keys   = {};
-const karts  = {}; // id → { mesh, current, target, nameTag }
-
-let toastTimer = null;
+const keys  = {};
+const karts = {}; // id → { mesh, current, target, nameTag, wheels }
 
 // ──────────────────────────────────────────────
-// Boot
+// Boot — wire up the menu, kick off model preload
 // ──────────────────────────────────────────────
-document.getElementById('nameInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter') startGame();
+window.addEventListener('DOMContentLoaded', () => {
+  wireMenu();
+  preloadKartModel();
 });
-document.getElementById('joinBtn').addEventListener('click', startGame);
 
-function startGame() {
-  const name = document.getElementById('nameInput').value.trim() || 'Racer';
-  document.getElementById('menu').style.display = 'none';
-  document.getElementById('gameContainer').style.display = 'block';
-  initThree();
-  connectWS(name);
+function wireMenu() {
+  const $ = (id) => document.getElementById(id);
+
+  $('quickBtn').addEventListener('click', () => startMode('quick'));
+  $('createBtn').addEventListener('click', () => showPanel('createPanel'));
+  $('joinBtn').addEventListener('click',   () => showPanel('joinPanel'));
+
+  $('createGo').addEventListener('click', () => startMode('create'));
+  $('joinGo').addEventListener('click',   () => startMode('join'));
+
+  $('createBack').addEventListener('click', () => showPanel('modePanel'));
+  $('joinBack').addEventListener('click',   () => showPanel('modePanel'));
+
+  // Enter key submits whichever panel is open
+  $('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMode('quick'); });
+  $('createPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMode('create'); });
+  $('joinCode').addEventListener('keydown',     (e) => { if (e.key === 'Enter') startMode('join'); });
+  $('joinPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMode('join'); });
+}
+
+function showPanel(id) {
+  for (const p of ['modePanel','createPanel','joinPanel']) {
+    document.getElementById(p).classList.toggle('hidden', p !== id);
+  }
+  document.getElementById('menuError').textContent = '';
+}
+
+function setMenuButtonsEnabled(enabled) {
+  for (const id of ['quickBtn','createBtn','joinBtn','createGo','joinGo']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !enabled;
+  }
+}
+
+function setMenuError(msg) {
+  document.getElementById('menuError').textContent = msg || '';
 }
 
 // ──────────────────────────────────────────────
-// Three.js initialisation
+// Kart-model preload (47 MB GLB; show progress)
+// ──────────────────────────────────────────────
+function preloadKartModel() {
+  const status = document.getElementById('loadingStatus');
+  if (typeof THREE.GLTFLoader !== 'function') {
+    status.textContent = 'Failed to load GLTFLoader';
+    return;
+  }
+  const loader = new THREE.GLTFLoader();
+  loader.load('/models/goCart.glb',
+    (gltf) => {
+      kartTemplate = prepareKartTemplate(gltf.scene);
+      status.textContent = 'Ready.';
+      setTimeout(() => status.style.display = 'none', 800);
+      setMenuButtonsEnabled(true);
+    },
+    (progress) => {
+      if (progress.total) {
+        const pct = Math.round(100 * progress.loaded / progress.total);
+        status.textContent = `Loading kart model… ${pct}%`;
+      } else {
+        const mb = (progress.loaded / 1048576).toFixed(1);
+        status.textContent = `Loading kart model… ${mb} MB`;
+      }
+    },
+    (err) => {
+      console.error('GLB load failed', err);
+      status.textContent = 'Failed to load kart model — check that models/goCart.glb exists.';
+    }
+  );
+}
+
+// prepareKartTemplate normalises scale / orientation / origin so every
+// cloned kart sits on the ground facing +Z (matches server move() heading).
+function prepareKartTemplate(scene) {
+  const wrapper = new THREE.Group();
+  wrapper.add(scene);
+
+  // Scale so longest axis ≈ 4 units (rough match for old box kart length).
+  let bbox = new THREE.Box3().setFromObject(scene);
+  const size = bbox.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const targetLen = 4.5;
+  scene.scale.setScalar(targetLen / maxDim);
+
+  // Re-centre on origin and rest on the ground (y = 0).
+  bbox = new THREE.Box3().setFromObject(scene);
+  const centre = bbox.getCenter(new THREE.Vector3());
+  scene.position.sub(new THREE.Vector3(centre.x, bbox.min.y, centre.z));
+
+  // Most exported karts face -Z by convention; flip so +Z matches server heading.
+  // If the model already faces +Z this just orbits 180° — visually identical
+  // to what the player expects from a kart sprite.
+  scene.rotation.y = Math.PI;
+
+  // Tag meshes that look like wheels so we can spin them with speed.
+  // Heuristic: anything in the lower 35 % of the bbox AND off-centre.
+  bbox = new THREE.Box3().setFromObject(scene);
+  const yMid = bbox.min.y + (bbox.max.y - bbox.min.y) * 0.35;
+  scene.traverse((child) => {
+    if (!child.isMesh) return;
+    const cb = new THREE.Box3().setFromObject(child);
+    const c  = cb.getCenter(new THREE.Vector3());
+    child.userData.isWheel = c.y < yMid && Math.abs(c.x) > 0.4;
+    child.castShadow = true;
+    child.receiveShadow = false;
+  });
+
+  return wrapper;
+}
+
+// makeKart deep-clones the template and tints every paintable material
+// with the player's colour. MeshStandardMaterial.color multiplies the
+// baseColor texture, so the kart keeps all baked detail but is recoloured.
+function makeKart(colorHex) {
+  const tint = new THREE.Color(colorHex);
+  const g = kartTemplate.clone(true);
+
+  const wheels = [];
+  g.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    // Three's Object3D.clone shares materials — we need our own copy per kart.
+    child.material = Array.isArray(child.material)
+      ? child.material.map(m => tintMaterial(m.clone(), tint))
+      : tintMaterial(child.material.clone(), tint);
+    child.castShadow = true;
+    if (child.userData.isWheel) wheels.push(child);
+  });
+
+  g.userData.wheels = wheels;
+  return g;
+}
+
+function tintMaterial(mat, tint) {
+  if (mat.color) mat.color.copy(tint);
+  // Suppress baked-in emissive so the body colour reads correctly under our lights.
+  if (mat.emissive) mat.emissive.setScalar(0);
+  return mat;
+}
+
+// ──────────────────────────────────────────────
+// Three.js initialisation (track + environment + loop)
 // ──────────────────────────────────────────────
 function initThree() {
-  // Scene
+  if (threeReady) return;
+  threeReady = true;
+
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
   scene.fog = new THREE.FogExp2(0x87ceeb, 0.004);
 
-  // Camera
   camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 600);
   camera.position.set(0, 8, -15);
 
-  // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Reasonable colour pipeline for PBR-textured GLB:
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.physicallyCorrectLights = true;
   document.getElementById('gameContainer').prepend(renderer.domElement);
 
-  // Lights
   const ambient = new THREE.AmbientLight(0xffffff, 0.55);
   scene.add(ambient);
 
-  const sun = new THREE.DirectionalLight(0xfff4e0, 1.1);
+  const sun = new THREE.DirectionalLight(0xfff4e0, 1.6);
   sun.position.set(80, 120, 60);
   sun.castShadow = true;
   sun.shadow.mapSize.width  = 2048;
@@ -91,18 +229,24 @@ function initThree() {
 
   clock = new THREE.Clock();
 
-  window.addEventListener('keydown', e => { keys[e.code] = true;  e.preventDefault(); });
+  window.addEventListener('keydown', e => { keys[e.code] = true;  if (shouldPreventDefault(e)) e.preventDefault(); });
   window.addEventListener('keyup',   e => { keys[e.code] = false; });
   window.addEventListener('resize',  onResize);
 
+  // Lobby chip click-to-copy
+  document.getElementById('lobbyChip').addEventListener('click', copyLobbyCode);
+
   animate();
+}
+
+function shouldPreventDefault(e) {
+  return ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code);
 }
 
 // ──────────────────────────────────────────────
 // Track & environment geometry
 // ──────────────────────────────────────────────
 function buildTrack() {
-  // Ground plane
   const groundGeo = new THREE.PlaneGeometry(600, 600);
   const groundMat = new THREE.MeshLambertMaterial({ color: 0x3e8e41 });
   const ground = new THREE.Mesh(groundGeo, groundMat);
@@ -110,7 +254,6 @@ function buildTrack() {
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Inner grass disc
   const innerGeo = new THREE.CircleGeometry(INNER_R - 1, 64);
   const innerMat = new THREE.MeshLambertMaterial({ color: 0x2d7a32 });
   const innerGrass = new THREE.Mesh(innerGeo, innerMat);
@@ -118,7 +261,6 @@ function buildTrack() {
   innerGrass.position.y = 0.01;
   scene.add(innerGrass);
 
-  // Asphalt ring
   const trackGeo = new THREE.RingGeometry(INNER_R, OUTER_R, 80);
   const trackMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
   const track = new THREE.Mesh(trackGeo, trackMat);
@@ -127,14 +269,10 @@ function buildTrack() {
   track.receiveShadow = true;
   scene.add(track);
 
-  // Curb strips (alternating red / white) at inner and outer edges
   buildCurbs(INNER_R - 0.5, INNER_R + 2, 36);
   buildCurbs(OUTER_R - 2,   OUTER_R + 0.5, 36);
-
-  // Centre-line dashes
   buildCentrelineDashes();
 
-  // Start / finish line (white stripe at Z=0, right side)
   const sfGeo = new THREE.PlaneGeometry(OUTER_R - INNER_R, 3);
   const sfMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   const sf = new THREE.Mesh(sfGeo, sfMat);
@@ -143,7 +281,6 @@ function buildTrack() {
   sf.position.set(MID_R, 0.035, 0);
   scene.add(sf);
 
-  // Checkered finish-line overlay
   buildCheckerboard(sf.position, OUTER_R - INNER_R, 3);
 }
 
@@ -165,11 +302,10 @@ function buildCentrelineDashes() {
   const dashMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   const DASHES = 24;
   for (let i = 0; i < DASHES; i++) {
-    if (i % 2 === 0) continue; // every other one
+    if (i % 2 === 0) continue;
     const angle = (i / DASHES) * Math.PI * 2;
     const geo = new THREE.PlaneGeometry(1.5, 5);
     const mesh = new THREE.Mesh(geo, dashMat);
-    // Pivot approach: parent rotated around Y places the dash on the circle.
     const pivot = new THREE.Object3D();
     pivot.rotation.y = -angle;
     mesh.rotation.x = -Math.PI / 2;
@@ -192,22 +328,18 @@ function buildCheckerboard(pos, width, depth) {
       mesh.rotation.x = -Math.PI / 2;
       mesh.rotation.z = Math.PI / 2;
       mesh.position.set(
-        pos.x,
+        pos.x + (c - cols / 2 + 0.5) * cw,
         0.038,
         pos.z + (r - rows / 2 + 0.5) * cd
       );
-      // Offset along width (X direction in local space, but rotated)
-      mesh.position.x = pos.x + (c - cols / 2 + 0.5) * cw;
       scene.add(mesh);
     }
   }
 }
 
 function buildEnvironment() {
-  // Grandstands on one straight
   buildStands(-120, 0, 0);
 
-  // Trees around outside
   const rng = mulberry32(42);
   for (let i = 0; i < 40; i++) {
     const angle = (i / 40) * Math.PI * 2 + rng() * 0.3;
@@ -217,7 +349,6 @@ function buildEnvironment() {
     scene.add(t);
   }
 
-  // Trees inside the loop
   for (let i = 0; i < 12; i++) {
     const angle = (i / 12) * Math.PI * 2;
     const r = rng() * (INNER_R - 12) + 5;
@@ -226,7 +357,6 @@ function buildEnvironment() {
     scene.add(t);
   }
 
-  // Tyre-stack barriers at track entry points (decorative)
   for (let i = 0; i < 8; i++) {
     const angle = (i / 8) * Math.PI * 2;
     const stack = makeTyreStack();
@@ -248,7 +378,6 @@ function buildStands(x, y, z) {
   mesh.castShadow = true;
   scene.add(mesh);
 
-  // Roof
   const roofGeo = new THREE.BoxGeometry(62, 1.5, 11);
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x7f8c8d });
   const roof = new THREE.Mesh(roofGeo, roofMat);
@@ -258,7 +387,6 @@ function buildStands(x, y, z) {
 
 function makeTree(h) {
   const g = new THREE.Group();
-
   const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, h * 0.45, 7);
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x7a5230 });
   const trunk = new THREE.Mesh(trunkGeo, trunkMat);
@@ -289,96 +417,6 @@ function makeTyreStack() {
 }
 
 // ──────────────────────────────────────────────
-// Kart mesh factory
-// ──────────────────────────────────────────────
-function makeKart(colorHex) {
-  const color = parseInt(colorHex.replace('#', ''), 16);
-  const g = new THREE.Group();
-
-  const bodyMat    = new THREE.MeshLambertMaterial({ color });
-  const darkMat    = new THREE.MeshLambertMaterial({ color: 0x111111 });
-  const chromeMat  = new THREE.MeshLambertMaterial({ color: 0xcccccc });
-  const windowMat  = new THREE.MeshLambertMaterial({ color: 0x224466, transparent: true, opacity: 0.7 });
-
-  // Main body
-  const bodyGeo = new THREE.BoxGeometry(2.6, 0.7, 4.2);
-  const body = new THREE.Mesh(bodyGeo, bodyMat);
-  body.position.y = 0.55;
-  body.castShadow = true;
-  g.add(body);
-
-  // Nose cone
-  const noseGeo = new THREE.BoxGeometry(2.2, 0.5, 1.2);
-  const nose = new THREE.Mesh(noseGeo, bodyMat);
-  nose.position.set(0, 0.45, 2.6);
-  nose.castShadow = true;
-  g.add(nose);
-
-  // Cockpit
-  const cockpitGeo = new THREE.BoxGeometry(1.4, 0.65, 2);
-  const cockpit = new THREE.Mesh(cockpitGeo, bodyMat);
-  cockpit.position.set(0, 1.08, 0.2);
-  cockpit.castShadow = true;
-  g.add(cockpit);
-
-  // Windscreen
-  const wsGeo = new THREE.BoxGeometry(1.2, 0.55, 0.15);
-  const ws = new THREE.Mesh(wsGeo, windowMat);
-  ws.position.set(0, 1.2, 1.2);
-  ws.rotation.x = 0.4;
-  g.add(ws);
-
-  // Rear wing
-  const wingGeo = new THREE.BoxGeometry(3.0, 0.12, 0.9);
-  const wing = new THREE.Mesh(wingGeo, bodyMat);
-  wing.position.set(0, 1.35, -2.1);
-  wing.rotation.x = -0.25;
-  g.add(wing);
-
-  const stanchionGeo = new THREE.BoxGeometry(0.15, 0.6, 0.15);
-  for (const sx of [-1.1, 1.1]) {
-    const s = new THREE.Mesh(stanchionGeo, chromeMat);
-    s.position.set(sx, 1.0, -2.1);
-    g.add(s);
-  }
-
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.75, 0.75, 0.55, 14);
-  const rimGeo   = new THREE.CylinderGeometry(0.38, 0.38, 0.58, 10);
-  const rimMat   = new THREE.MeshLambertMaterial({ color: 0xaaaaaa });
-
-  const wheelPos = [
-    [-1.55, 0.5,  1.7],
-    [ 1.55, 0.5,  1.7],
-    [-1.55, 0.5, -1.7],
-    [ 1.55, 0.5, -1.7],
-  ];
-  wheelPos.forEach(([wx, wy, wz]) => {
-    const wheel = new THREE.Mesh(wheelGeo, darkMat);
-    wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, wy, wz);
-    wheel.castShadow = true;
-    g.add(wheel);
-
-    const rim = new THREE.Mesh(rimGeo, rimMat);
-    rim.rotation.z = Math.PI / 2;
-    rim.position.set(wx, wy, wz);
-    g.add(rim);
-  });
-
-  // Exhaust pipes
-  const exGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.8, 8);
-  for (const ex of [-0.5, 0.5]) {
-    const pipe = new THREE.Mesh(exGeo, chromeMat);
-    pipe.rotation.x = Math.PI / 2;
-    pipe.position.set(ex, 0.6, -2.5);
-    g.add(pipe);
-  }
-
-  return g;
-}
-
-// ──────────────────────────────────────────────
 // Name-tag sprite above kart
 // ──────────────────────────────────────────────
 function makeNameTag(name) {
@@ -401,7 +439,7 @@ function makeNameTag(name) {
   const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(5, 1.25, 1);
-  sprite.position.y = 3.5;
+  sprite.position.y = 4.0;
   return sprite;
 }
 
@@ -420,19 +458,42 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // ──────────────────────────────────────────────
-// WebSocket networking
+// Lobby flow + WebSocket
 // ──────────────────────────────────────────────
-function connectWS(playerName) {
+function startMode(mode) {
+  setMenuError('');
+  if (!kartTemplate) { setMenuError('Kart still loading…'); return; }
+
+  const name = (document.getElementById('nameInput').value || '').trim() || 'Racer';
+  pendingJoinName = name;
+
+  // Open WS first; once it's open we send the appropriate join request.
+  if (!ws || ws.readyState >= WebSocket.CLOSING) connectWS();
+
+  const send = () => sendJoinRequest(mode, name);
+  if (ws.readyState === WebSocket.OPEN) send();
+  else ws.addEventListener('open', send, { once: true });
+}
+
+function sendJoinRequest(mode, name) {
+  if (mode === 'quick') {
+    ws.send(JSON.stringify({ type: 'quickMatch', name }));
+  } else if (mode === 'create') {
+    const password = document.getElementById('createPassword').value || '';
+    ws.send(JSON.stringify({ type: 'createLobby', name, password, private: true }));
+  } else if (mode === 'join') {
+    const code = (document.getElementById('joinCode').value || '').trim().toUpperCase();
+    const password = document.getElementById('joinPassword').value || '';
+    if (!code) { setMenuError('Enter a lobby code.'); return; }
+    ws.send(JSON.stringify({ type: 'joinLobby', name, code, password }));
+  }
+}
+
+function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'setName', name: playerName }));
-    showToast('Connected!', 2000);
-  };
-
   ws.onmessage = e => {
-    // Server may batch multiple JSON objects separated by newlines.
     e.data.split('\n').forEach(line => {
       line = line.trim();
       if (!line) return;
@@ -440,7 +501,12 @@ function connectWS(playerName) {
     });
   };
 
-  ws.onclose = () => showToast('Disconnected', 0);
+  ws.onclose = () => {
+    if (threeReady) showToast('Disconnected', 0);
+    else setMenuError('Connection closed.');
+  };
+
+  ws.onerror = () => setMenuError('Connection error.');
 }
 
 function handleServerMsg(msg) {
@@ -449,12 +515,72 @@ function handleServerMsg(msg) {
       myId = msg.yourId;
       break;
 
+    case 'joined':
+      myColor   = msg.color;
+      lobbyCode = msg.code;
+      lobbyPriv = !!msg.isPrivate;
+      enterGame();
+      break;
+
+    case 'lobbyError':
+      setMenuError(prettyLobbyError(msg.error));
+      break;
+
     case 'state':
       applyState(msg.players || []);
       break;
   }
 }
 
+function prettyLobbyError(code) {
+  switch (code) {
+    case 'no_such_lobby':   return 'No lobby with that code.';
+    case 'wrong_password':  return 'Wrong password.';
+    case 'lobby_full':      return 'Lobby is full.';
+    case 'already_in_lobby':return 'You are already in a lobby.';
+    case 'lobby_alloc_failed': return 'Server is at capacity. Try again.';
+    default: return 'Could not join lobby (' + code + ').';
+  }
+}
+
+function enterGame() {
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('gameContainer').style.display = 'block';
+
+  // Show / hide lobby chip + render code
+  const chip = document.getElementById('lobbyChip');
+  if (lobbyCode) {
+    chip.style.display = 'block';
+    chip.querySelector('.code').textContent = lobbyCode;
+    chip.querySelector('.label').textContent = lobbyPriv ? 'Private Lobby' : 'Public Lobby';
+  } else {
+    chip.style.display = 'none';
+  }
+
+  initThree();
+}
+
+function copyLobbyCode() {
+  if (!lobbyCode) return;
+  const text = lobbyCode;
+  const done = () => {
+    const chip = document.getElementById('lobbyChip');
+    chip.classList.add('flash');
+    setTimeout(() => chip.classList.remove('flash'), 1200);
+  };
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(done, done);
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+    done();
+  }
+}
+
+// ──────────────────────────────────────────────
+// State application
+// ──────────────────────────────────────────────
 function applyState(players) {
   const seen = new Set();
 
@@ -462,7 +588,6 @@ function applyState(players) {
     seen.add(s.id);
 
     if (!karts[s.id]) {
-      // First time seeing this player — spawn kart
       const mesh    = makeKart(s.color);
       const nameTag = makeNameTag(s.name);
       mesh.add(nameTag);
@@ -471,6 +596,7 @@ function applyState(players) {
       karts[s.id] = {
         mesh,
         nameTag,
+        wheels:  mesh.userData.wheels || [],
         current: { x: s.x, y: s.y, z: s.z, rotY: s.rotY },
         target:  { ...s },
       };
@@ -479,7 +605,6 @@ function applyState(players) {
     }
   });
 
-  // Remove karts for players who left
   for (const id in karts) {
     if (!seen.has(id)) {
       scene.remove(karts[id].mesh);
@@ -494,7 +619,7 @@ function applyState(players) {
 let lastInputJSON = '';
 
 function sendInput() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN || !lobbyCode) return;
 
   const boosting = keys['ShiftLeft'] || keys['ShiftRight'];
 
@@ -507,7 +632,6 @@ function sendInput() {
     boost:   !!boosting,
   };
 
-  // Manage boost charge
   if (boosting) {
     boostCharge = Math.max(0, boostCharge - 0.008);
     if (boostCharge === 0) inp.boost = false;
@@ -538,9 +662,6 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-// ──────────────────────────────────────────────
-// Interpolation
-// ──────────────────────────────────────────────
 function interpolateKarts() {
   for (const id in karts) {
     const k = karts[id];
@@ -557,15 +678,11 @@ function interpolateKarts() {
 
     // Spin wheels proportional to speed
     const speed = t.speed || 0;
-    k.mesh.children.forEach(child => {
-      if (child.geometry instanceof THREE.CylinderGeometry &&
-          child.geometry.parameters.radiusTop < 0.8) {
-        // wheels are cylinders rotated 90° on Z
-        child.rotation.x += speed * 0.04;
-      }
-    });
+    if (k.wheels && k.wheels.length) {
+      for (const w of k.wheels) w.rotation.x += speed * 0.04;
+    }
 
-    // Hide own name tag so it doesn't overlap the HUD
+    // Hide own name tag — overlaps the HUD
     if (id === myId && k.nameTag) k.nameTag.visible = false;
   }
 }
@@ -603,42 +720,33 @@ function updateCamera() {
 function updateHUD() {
   const me = myId && karts[myId] ? karts[myId].target : null;
 
-  // Speed (convert units/s → km/h with factor ~3.6)
   const kmh = me ? Math.abs(Math.round(me.speed * 3.6)) : 0;
   document.getElementById('speedValue').textContent = kmh;
 
-  // Lap
   const lap = me ? Math.min(me.lap + 1, TOTAL_LAPS) : 1;
   document.getElementById('lapDisplay').textContent =
     `LAP ${lap} / ${TOTAL_LAPS}`;
 
-  // Finished banner
   if (me && me.finished && !window._shownFinish) {
     window._shownFinish = true;
     showToast('FINISHED! 🏁', 0);
   }
 
-  // Boost bar
   document.getElementById('boostFill').style.height = (boostCharge * 100) + '%';
 
-  // Position (rank by lap desc, then distance-to-finish asc)
   const allPlayers = Object.values(karts).map(k => k.target).filter(Boolean);
   allPlayers.sort((a, b) => {
     if (b.lap !== a.lap) return b.lap - a.lap;
-    // More of the lap completed = farther along
-    const da = distAlongTrack(a.x, a.z);
-    const db = distAlongTrack(b.x, b.z);
-    return db - da;
+    return distAlongTrack(b.x, b.z) - distAlongTrack(a.x, a.z);
   });
   const pos = allPlayers.findIndex(p => p.id === myId) + 1;
   const ord = pos <= 3 ? SUFFIXES[pos] : 'TH';
   document.getElementById('posOrdinal').textContent = pos || 1;
   document.getElementById('posSuffix').textContent  = ord;
 
-  // Player list
   const entries = document.getElementById('plEntries');
   entries.innerHTML = '';
-  allPlayers.forEach((p, i) => {
+  allPlayers.forEach((p) => {
     const div = document.createElement('div');
     div.className = 'pl-entry';
     div.innerHTML = `
@@ -649,12 +757,8 @@ function updateHUD() {
   });
 }
 
-// Estimate how far around the track (in radians) a position is.
 function distAlongTrack(x, z) {
-  // Track goes counterclockwise; angle increases as kart progresses.
-  // atan2(z, x) gives angle; we want CCW from the start line at (MID_R, 0).
   let angle = Math.atan2(z, x);
-  // Normalise so 0 = start line and increasing = more progress
   angle = (angle + Math.PI * 2) % (Math.PI * 2);
   return angle;
 }
@@ -671,26 +775,22 @@ function drawMinimap() {
 
   ctx.clearRect(0, 0, W, H);
 
-  // Background
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
   ctx.beginPath();
   ctx.arc(cx, cy, W / 2, 0, Math.PI * 2);
   ctx.fill();
 
-  // Grass inside
   ctx.fillStyle = '#2d7a32';
   ctx.beginPath();
   ctx.arc(cx, cy, INNER_R * scale, 0, Math.PI * 2);
   ctx.fill();
 
-  // Track ring
   ctx.strokeStyle = '#555';
   ctx.lineWidth = (OUTER_R - INNER_R) * scale;
   ctx.beginPath();
   ctx.arc(cx, cy, MID_R * scale, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Start line
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -698,7 +798,6 @@ function drawMinimap() {
   ctx.lineTo(cx + OUTER_R * scale, cy);
   ctx.stroke();
 
-  // Karts
   for (const id in karts) {
     const k  = karts[id];
     const px = cx + k.current.x * scale;
@@ -731,23 +830,16 @@ function showToast(text, duration) {
   }
 }
 
-// ──────────────────────────────────────────────
-// Resize handler
-// ──────────────────────────────────────────────
 function onResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 }
 
-// ──────────────────────────────────────────────
-// Utilities
-// ──────────────────────────────────────────────
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// Deterministic PRNG (mulberry32) so trees are the same every reload.
 function mulberry32(seed) {
   return function() {
     seed |= 0; seed = seed + 0x6D2B79F5 | 0;

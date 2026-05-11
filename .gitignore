@@ -1,2 +1,7 @@
 # Compiled binary
 gocart
+gocart.exe
+
+# Large model assets — served at runtime from models/, kept out of git.
+# Copy goCart_low.glb here as goCart.glb (or set up git-lfs).
+models/*.glb

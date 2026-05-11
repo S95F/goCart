@@ -11,16 +11,16 @@ const (
 	broadcastHz = 20
 )
 
-// Game owns all player state and runs the authoritative physics loop.
+// Game owns the physics loop for a single lobby.
 type Game struct {
-	hub     *Hub
+	lobby   *Lobby
 	mu      sync.RWMutex
 	players map[string]*Player
 }
 
-func NewGame(hub *Hub) *Game {
+func NewGame(lobby *Lobby) *Game {
 	return &Game{
-		hub:     hub,
+		lobby:   lobby,
 		players: make(map[string]*Player),
 	}
 }
@@ -56,8 +56,8 @@ func (g *Game) SetPlayerName(playerID, name string) {
 	g.mu.Unlock()
 }
 
-// Run starts the physics and broadcast tickers; call in a goroutine.
-func (g *Game) Run() {
+// Run drives the physics + broadcast tickers until stop is closed.
+func (g *Game) Run(stop <-chan struct{}) {
 	physicsTick := time.NewTicker(time.Second / physicsHz)
 	broadcastTick := time.NewTicker(time.Second / broadcastHz)
 	defer physicsTick.Stop()
@@ -65,6 +65,8 @@ func (g *Game) Run() {
 
 	for {
 		select {
+		case <-stop:
+			return
 		case <-physicsTick.C:
 			g.update(1.0 / physicsHz)
 		case <-broadcastTick.C:
@@ -96,5 +98,5 @@ func (g *Game) broadcast() {
 	if err != nil {
 		return
 	}
-	g.hub.Broadcast(msg)
+	g.lobby.Broadcast(msg)
 }
