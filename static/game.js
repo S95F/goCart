@@ -489,7 +489,7 @@ function roundRect(ctx, x, y, w, h, r) {
 // ──────────────────────────────────────────────
 function startMode(mode) {
   setMenuError('');
-  if (!kartTemplate) { setMenuError('Kart still loading…'); return; }
+  if (!kartTemplates) { setMenuError('Kart still loading…'); return; }
 
   const name = (document.getElementById('nameInput').value || '').trim() || 'Racer';
   pendingJoinName = name;
