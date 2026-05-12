@@ -43,8 +43,8 @@ const (
 	frictionRate    = 12.0
 	turnRate        = 2.4
 
-	trackInnerRadius = 55.0
-	trackOuterRadius = 85.0
+	trackInnerRadius = 70.0
+	trackOuterRadius = 115.0
 	totalLaps        = 3
 )
 
@@ -52,9 +52,10 @@ const (
 func (p *Player) SpawnPosition(index int) {
 	col := float64(index % 2)
 	row := float64(index / 2)
-	// Start grid on the right straight, just past the start line (Z positive)
-	p.State.X = 73.0 - col*6.0
-	p.State.Z = 8.0 + row*12.0
+	// Start grid on the right straight, just past the start line (Z positive).
+	// X is set just inside trackOuterRadius so the front row sits near the outer line.
+	p.State.X = 100.0 - col*7.0
+	p.State.Z = 10.0 + row*14.0
 	p.State.Y = 0
 	p.State.RotY = 0 // facing +Z (counterclockwise)
 	p.State.Speed = 0
@@ -162,7 +163,7 @@ func (p *Player) wallBounce() {
 }
 
 // checkLap counts a lap each time the player crosses Z=0 going in the +Z
-// direction (counterclockwise) while on the right straight (X > 55).
+// direction (counterclockwise) while on the right straight (X > trackInnerRadius).
 // A crossedTop guard prevents false triggers at spawn.
 func (p *Player) checkLap() {
 	s := &p.State

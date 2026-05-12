@@ -7,8 +7,8 @@
 'use strict';
 
 // ── Track constants (must match server player.go) ──
-const INNER_R    = 55;
-const OUTER_R    = 85;
+const INNER_R    = 70;
+const OUTER_R    = 115;
 const MID_R      = (INNER_R + OUTER_R) / 2;
 const TOTAL_LAPS = 3;
 
@@ -151,10 +151,14 @@ function prepareKartTemplate(scene) {
   const centre = bbox.getCenter(new THREE.Vector3());
   scene.position.sub(new THREE.Vector3(centre.x, bbox.min.y, centre.z));
 
-  // Most exported karts face -Z by convention; flip so +Z matches server heading.
-  // If the model already faces +Z this just orbits 180° — visually identical
-  // to what the player expects from a kart sprite.
-  scene.rotation.y = Math.PI;
+  // Server convention: RotY=0 means facing +Z (see player.go SpawnPosition).
+  // The current GLB exports facing -X, so rotate +90° around Y to map -X → +Z.
+  // If you swap in a model with a different "forward" axis, change this:
+  //   model faces -Z  →  Math.PI
+  //   model faces +X  →  -Math.PI / 2
+  //   model faces -X  →  Math.PI / 2   ← current
+  //   model faces +Z  →  0
+  scene.rotation.y = Math.PI / 2;
 
   // Tag meshes that look like wheels so we can spin them with speed.
   // Heuristic: anything in the lower 35 % of the bbox AND off-centre.
@@ -253,6 +257,7 @@ function initThree() {
 
   buildTrack();
   buildEnvironment();
+  initParticles();
 
   clock = new THREE.Clock();
 
@@ -274,31 +279,46 @@ function shouldPreventDefault(e) {
 // Track & environment geometry
 // ──────────────────────────────────────────────
 function buildTrack() {
-  const groundGeo = new THREE.PlaneGeometry(600, 600);
-  const groundMat = new THREE.MeshLambertMaterial({ color: 0x3e8e41 });
+  const grassTex = makeGrassTexture();
+  grassTex.wrapS = grassTex.wrapT = THREE.RepeatWrapping;
+  grassTex.repeat.set(40, 40);
+
+  const groundGeo = new THREE.PlaneGeometry(800, 800);
+  const groundMat = new THREE.MeshLambertMaterial({ map: grassTex, color: 0x6aa84f });
   const ground = new THREE.Mesh(groundGeo, groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
 
-  const innerGeo = new THREE.CircleGeometry(INNER_R - 1, 64);
-  const innerMat = new THREE.MeshLambertMaterial({ color: 0x2d7a32 });
+  // Inner infield: slightly darker grass tint to read as a distinct area.
+  const innerTex = grassTex.clone();
+  innerTex.needsUpdate = true;
+  innerTex.wrapS = innerTex.wrapT = THREE.RepeatWrapping;
+  innerTex.repeat.set(10, 10);
+  const innerGeo = new THREE.CircleGeometry(INNER_R - 1, 96);
+  const innerMat = new THREE.MeshLambertMaterial({ map: innerTex, color: 0x4f8a3a });
   const innerGrass = new THREE.Mesh(innerGeo, innerMat);
   innerGrass.rotation.x = -Math.PI / 2;
   innerGrass.position.y = 0.01;
+  innerGrass.receiveShadow = true;
   scene.add(innerGrass);
 
-  const trackGeo = new THREE.RingGeometry(INNER_R, OUTER_R, 80);
-  const trackMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
+  const asphaltTex = makeAsphaltTexture();
+  asphaltTex.wrapS = asphaltTex.wrapT = THREE.RepeatWrapping;
+  asphaltTex.repeat.set(24, 4);
+
+  const trackGeo = new THREE.RingGeometry(INNER_R, OUTER_R, 120);
+  const trackMat = new THREE.MeshLambertMaterial({ map: asphaltTex, color: 0x4a4a4a });
   const track = new THREE.Mesh(trackGeo, trackMat);
   track.rotation.x = -Math.PI / 2;
   track.position.y = 0.02;
   track.receiveShadow = true;
   scene.add(track);
 
-  buildCurbs(INNER_R - 0.5, INNER_R + 2, 36);
-  buildCurbs(OUTER_R - 2,   OUTER_R + 0.5, 36);
+  buildCurbs(INNER_R - 0.5, INNER_R + 2.2, 60);
+  buildCurbs(OUTER_R - 2.2, OUTER_R + 0.5, 60);
   buildCentrelineDashes();
+  buildOuterBarrier();
 
   const sfGeo = new THREE.PlaneGeometry(OUTER_R - INNER_R, 3);
   const sfMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
@@ -309,6 +329,73 @@ function buildTrack() {
   scene.add(sf);
 
   buildCheckerboard(sf.position, OUTER_R - INNER_R, 3);
+}
+
+// makeGrassTexture: noisy green canvas tile. Wrapped + repeated across the
+// ground plane so a single 128px texture covers the whole field.
+function makeGrassTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#558b3a';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * 128;
+    const y = Math.random() * 128;
+    const shade = 60 + Math.random() * 90;
+    const g = Math.round(120 + Math.random() * 60);
+    ctx.fillStyle = `rgba(${Math.round(shade*0.5)},${g},${Math.round(shade*0.5)},${0.25 + Math.random()*0.4})`;
+    ctx.fillRect(x, y, 1 + Math.random()*1.5, 1 + Math.random()*1.5);
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+// makeAsphaltTexture: dark-grey noise with subtle horizontal streaks for
+// the "wear pattern" look. Repeated tangentially around the ring.
+function makeAsphaltTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#3b3b3b';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 2000; i++) {
+    const v = 30 + Math.random() * 60;
+    ctx.fillStyle = `rgba(${v},${v},${v},${0.25 + Math.random()*0.4})`;
+    ctx.fillRect(Math.random()*128, Math.random()*128, 1, 1);
+  }
+  // Faint racing-line streaks
+  ctx.strokeStyle = 'rgba(20,20,20,0.25)';
+  for (let i = 0; i < 8; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, Math.random() * 128);
+    ctx.bezierCurveTo(40, Math.random()*128, 80, Math.random()*128, 128, Math.random()*128);
+    ctx.stroke();
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+// Outer barrier: a low Armco-style steel rail wrapping the outside of the
+// circuit. Visual only — server-side wallBounce already keeps karts inside.
+function buildOuterBarrier() {
+  const railR = OUTER_R + 1.2;
+  const railGeo = new THREE.TorusGeometry(railR, 0.45, 8, 160);
+  const railMat = new THREE.MeshLambertMaterial({ color: 0xd9d9d9 });
+  const rail = new THREE.Mesh(railGeo, railMat);
+  rail.rotation.x = Math.PI / 2;
+  rail.position.y = 1.0;
+  rail.castShadow = true;
+  scene.add(rail);
+
+  const postMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+  const postGeo = new THREE.BoxGeometry(0.25, 1.0, 0.25);
+  const POSTS = 80;
+  for (let i = 0; i < POSTS; i++) {
+    const a = (i / POSTS) * Math.PI * 2;
+    const post = new THREE.Mesh(postGeo, postMat);
+    post.position.set(Math.cos(a) * railR, 0.5, Math.sin(a) * railR);
+    post.castShadow = true;
+    scene.add(post);
+  }
 }
 
 function buildCurbs(r0, r1, segments) {
@@ -365,32 +452,37 @@ function buildCheckerboard(pos, width, depth) {
 }
 
 function buildEnvironment() {
-  buildStands(-120, 0, 0);
+  buildStands(-(OUTER_R + 18), 0, 0);
 
   const rng = mulberry32(42);
-  for (let i = 0; i < 40; i++) {
-    const angle = (i / 40) * Math.PI * 2 + rng() * 0.3;
-    const r = OUTER_R + 18 + rng() * 35;
-    const t = makeTree(3 + rng() * 3);
+  // Outer forest — denser ring of trees set back from the barrier.
+  for (let i = 0; i < 80; i++) {
+    const angle = (i / 80) * Math.PI * 2 + rng() * 0.25;
+    const r = OUTER_R + 14 + rng() * 60;
+    const t = makeTree(3 + rng() * 4);
     t.position.set(Math.cos(angle) * r, 0, Math.sin(angle) * r);
+    t.rotation.y = rng() * Math.PI * 2;
     scene.add(t);
   }
 
-  for (let i = 0; i < 12; i++) {
-    const angle = (i / 12) * Math.PI * 2;
-    const r = rng() * (INNER_R - 12) + 5;
+  // Infield trees — sparser, clustered toward the centre.
+  for (let i = 0; i < 18; i++) {
+    const angle = rng() * Math.PI * 2;
+    const r = rng() * (INNER_R - 14) + 4;
     const t = makeTree(2 + rng() * 3);
     t.position.set(Math.cos(angle) * r, 0, Math.sin(angle) * r);
+    t.rotation.y = rng() * Math.PI * 2;
     scene.add(t);
   }
 
-  for (let i = 0; i < 8; i++) {
-    const angle = (i / 8) * Math.PI * 2;
+  // Tyre stacks just outside the barrier as chicane-style accents.
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2;
     const stack = makeTyreStack();
     stack.position.set(
-      Math.cos(angle) * (OUTER_R + 3),
+      Math.cos(angle) * (OUTER_R + 3.5),
       0,
-      Math.sin(angle) * (OUTER_R + 3)
+      Math.sin(angle) * (OUTER_R + 3.5)
     );
     stack.rotation.y = angle;
     scene.add(stack);
@@ -399,17 +491,27 @@ function buildEnvironment() {
 
 function buildStands(x, y, z) {
   const standMat = new THREE.MeshLambertMaterial({ color: 0x95a5a6 });
-  const geo = new THREE.BoxGeometry(60, 12, 10);
+  const geo = new THREE.BoxGeometry(90, 14, 12);
   const mesh = new THREE.Mesh(geo, standMat);
-  mesh.position.set(x, 6, z);
+  mesh.position.set(x, 7, z);
   mesh.castShadow = true;
   scene.add(mesh);
 
-  const roofGeo = new THREE.BoxGeometry(62, 1.5, 11);
+  const roofGeo = new THREE.BoxGeometry(93, 1.5, 13);
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x7f8c8d });
   const roof = new THREE.Mesh(roofGeo, roofMat);
-  roof.position.set(x, 13, z);
+  roof.position.set(x, 15, z);
   scene.add(roof);
+
+  // Support pillars to ground the structure visually.
+  const pillarMat = new THREE.MeshLambertMaterial({ color: 0x7f8c8d });
+  const pillarGeo = new THREE.BoxGeometry(1.2, 7, 1.2);
+  for (let i = -2; i <= 2; i++) {
+    const p = new THREE.Mesh(pillarGeo, pillarMat);
+    p.position.set(x + i * 18, 3.5, z);
+    p.castShadow = true;
+    scene.add(p);
+  }
 }
 
 function makeTree(h) {
@@ -441,6 +543,130 @@ function makeTyreStack() {
     g.add(m);
   }
   return g;
+}
+
+// ──────────────────────────────────────────────
+// Exhaust / speed-smoke particle system
+// Pooled sprite particles so the GC never sees an allocation in steady state.
+// Emission rate scales with speed; boost (speed beyond cruise max) goes brrr.
+// ──────────────────────────────────────────────
+const PARTICLE_POOL_SIZE = 240;
+const PARTICLE_SPEED_FLOOR = 8;   // m/s under which no smoke is emitted
+const PARTICLE_CRUISE_MAX  = 40;  // matches server maxForwardSpeed
+let particlePool = [];
+let smokeTexture = null;
+
+function makeSmokeTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0.0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.35,'rgba(220,220,220,0.55)');
+  g.addColorStop(1.0, 'rgba(180,180,180,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+function initParticles() {
+  smokeTexture = makeSmokeTexture();
+  for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+    const mat = new THREE.SpriteMaterial({
+      map: smokeTexture,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.visible = false;
+    scene.add(sprite);
+    particlePool.push({
+      sprite, alive: false, age: 0, lifetime: 1,
+      vx: 0, vy: 0, vz: 0, baseScale: 1, tint: 0xffffff,
+    });
+  }
+}
+
+// emitSmoke spawns one particle behind a kart facing rotY, with a small jitter.
+// boostFactor in [1,2]: 1 = cruise smoke, 2 = full boost (brighter, faster).
+function emitSmoke(x, y, z, rotY, boostFactor) {
+  let p = null;
+  for (const q of particlePool) { if (!q.alive) { p = q; break; } }
+  if (!p) return;
+
+  const back = 2.2;
+  const jitter = 0.4;
+  p.alive    = true;
+  p.age      = 0;
+  p.lifetime = 0.55 + Math.random() * 0.45;
+
+  p.sprite.position.set(
+    x - Math.sin(rotY) * back + (Math.random() - 0.5) * jitter,
+    y + 0.45,
+    z - Math.cos(rotY) * back + (Math.random() - 0.5) * jitter,
+  );
+
+  const drift = 1.8 + Math.random() * 1.2;
+  p.vx = -Math.sin(rotY) * drift + (Math.random() - 0.5) * 1.2;
+  p.vz = -Math.cos(rotY) * drift + (Math.random() - 0.5) * 1.2;
+  p.vy = 1.4 + Math.random() * 1.0;
+
+  p.baseScale = (0.7 + Math.random() * 0.5) * boostFactor;
+  p.sprite.scale.set(p.baseScale, p.baseScale, 1);
+  p.sprite.material.opacity = 0.6 + 0.3 * (boostFactor - 1);
+  p.sprite.visible = true;
+}
+
+function updateParticles(dt) {
+  for (const p of particlePool) {
+    if (!p.alive) continue;
+    p.age += dt;
+    if (p.age >= p.lifetime) {
+      p.alive = false;
+      p.sprite.visible = false;
+      continue;
+    }
+    p.sprite.position.x += p.vx * dt;
+    p.sprite.position.y += p.vy * dt;
+    p.sprite.position.z += p.vz * dt;
+    // Particles slow as they age (air drag).
+    p.vx *= (1 - dt * 1.5);
+    p.vz *= (1 - dt * 1.5);
+    p.vy *= (1 - dt * 0.8);
+
+    const t = p.age / p.lifetime;
+    p.sprite.material.opacity = (0.85) * (1 - t);
+    const s = p.baseScale * (1 + t * 2.0);
+    p.sprite.scale.set(s, s, 1);
+  }
+}
+
+// Drives emission per kart based on its server-reported speed.
+// Speed-keyed so it works identically for local and remote players.
+function emitKartParticles(dt) {
+  for (const id in karts) {
+    const k = karts[id];
+    const speed = Math.abs((k.target && k.target.speed) || 0);
+    if (speed < PARTICLE_SPEED_FLOOR) {
+      k._emitAccum = 0;
+      continue;
+    }
+    // Above cruise max is only reachable with boost (server caps to 1.55x).
+    const boostFactor = speed > PARTICLE_CRUISE_MAX
+      ? 1 + (speed - PARTICLE_CRUISE_MAX) / (PARTICLE_CRUISE_MAX * 0.55)
+      : 1;
+    const ratePerSec = Math.min(
+      (speed - PARTICLE_SPEED_FLOOR) * 0.7,
+      35
+    ) * boostFactor;
+
+    k._emitAccum = (k._emitAccum || 0) + ratePerSec * dt;
+    while (k._emitAccum >= 1) {
+      k._emitAccum -= 1;
+      emitSmoke(k.current.x, k.current.y, k.current.z, k.current.rotY, boostFactor);
+    }
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -682,6 +908,8 @@ function animate() {
 
   sendInput();
   interpolateKarts(dt);
+  emitKartParticles(dt);
+  updateParticles(dt);
   updateCamera();
   updateHUD();
   drawMinimap();
