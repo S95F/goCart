@@ -1,7 +1,10 @@
 # Compiled binary
 gocart
 gocart.exe
-.claude
-# Large model assets — served at runtime from models/, kept out of git.
-# Copy goCart_low.glb here as goCart.glb (or set up git-lfs).
-models/*.glb
+
+
+# Claude Code worktrees / scratch
+.claude/
+
+
+

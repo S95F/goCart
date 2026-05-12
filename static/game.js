@@ -26,7 +26,7 @@ let lobbyCode  = null;
 let lobbyPriv  = false;
 let ws         = null;
 let boostCharge = 1.0;
-let kartTemplate = null;     // cached GLB scene used as a clone source
+let kartTemplates = null;    // [high, med, low] prepared GLB scenes
 let threeReady   = false;    // initThree() has run
 let toastTimer   = null;
 let pendingJoinName = null;  // sent once WS opens
@@ -81,8 +81,17 @@ function setMenuError(msg) {
 }
 
 // ──────────────────────────────────────────────
-// Kart-model preload (47 MB GLB; show progress)
+// Kart-model preload — three LODs loaded in parallel.
+// THREE.LOD picks the right one per-frame based on camera distance.
+// Distance thresholds picked to keep the chase-cam (≈16u away) on high
+// and only swap when other karts are well behind.
 // ──────────────────────────────────────────────
+const KART_LODS = [
+  { url: '/static/models/goCart_high.glb', distance:  0 },
+  { url: '/static/models/goCart_med.glb',  distance: 35 },
+  { url: '/static/models/goCart_low.glb',  distance: 90 },
+];
+
 function preloadKartModel() {
   const status = document.getElementById('loadingStatus');
   if (typeof THREE.GLTFLoader !== 'function') {
@@ -90,27 +99,38 @@ function preloadKartModel() {
     return;
   }
   const loader = new THREE.GLTFLoader();
-  loader.load('/models/goCart.glb',
-    (gltf) => {
-      kartTemplate = prepareKartTemplate(gltf.scene);
-      status.textContent = 'Ready.';
-      setTimeout(() => status.style.display = 'none', 800);
-      setMenuButtonsEnabled(true);
-    },
-    (progress) => {
-      if (progress.total) {
-        const pct = Math.round(100 * progress.loaded / progress.total);
-        status.textContent = `Loading kart model… ${pct}%`;
-      } else {
-        const mb = (progress.loaded / 1048576).toFixed(1);
-        status.textContent = `Loading kart model… ${mb} MB`;
-      }
-    },
-    (err) => {
-      console.error('GLB load failed', err);
-      status.textContent = 'Failed to load kart model — check that models/goCart.glb exists.';
+
+  const totals  = new Array(KART_LODS.length).fill(0);
+  const loadeds = new Array(KART_LODS.length).fill(0);
+  const labels  = ['high', 'med', 'low'];
+
+  function paintProgress() {
+    const total  = totals.reduce((a, b) => a + b, 0);
+    const loaded = loadeds.reduce((a, b) => a + b, 0);
+    if (total > 0) {
+      const pct = Math.round(100 * loaded / total);
+      status.textContent = `Loading kart models… ${pct}% (${(total/1048576).toFixed(0)} MB)`;
+    } else {
+      const mb = (loaded / 1048576).toFixed(1);
+      status.textContent = `Loading kart models… ${mb} MB`;
     }
-  );
+  }
+
+  Promise.all(KART_LODS.map((cfg, i) => new Promise((resolve, reject) => {
+    loader.load(cfg.url,
+      (gltf) => resolve(prepareKartTemplate(gltf.scene)),
+      (p)    => { loadeds[i] = p.loaded; totals[i] = p.total || p.loaded; paintProgress(); },
+      (err)  => reject(new Error(`${labels[i]} (${cfg.url}): ${err.message || err}`)),
+    );
+  }))).then((templates) => {
+    kartTemplates = templates;
+    status.textContent = 'Ready.';
+    setTimeout(() => status.style.display = 'none', 800);
+    setMenuButtonsEnabled(true);
+  }).catch((err) => {
+    console.error('GLB load failed', err);
+    status.textContent = 'Failed to load kart models — check static/models/goCart_{high,med,low}.glb';
+  });
 }
 
 // prepareKartTemplate normalises scale / orientation / origin so every
@@ -152,26 +172,33 @@ function prepareKartTemplate(scene) {
   return wrapper;
 }
 
-// makeKart deep-clones the template and tints every paintable material
-// with the player's colour. MeshStandardMaterial.color multiplies the
-// baseColor texture, so the kart keeps all baked detail but is recoloured.
+// makeKart returns a THREE.LOD with all three detail levels, each deep-cloned
+// from its template and tinted with the player's colour. Three.js swaps which
+// level is rendered each frame based on camera distance.
+// MeshStandardMaterial.color multiplies the baseColor texture, so the kart
+// keeps all baked detail while being recoloured per player.
 function makeKart(colorHex) {
   const tint = new THREE.Color(colorHex);
-  const g = kartTemplate.clone(true);
-
+  const lod  = new THREE.LOD();
   const wheels = [];
-  g.traverse((child) => {
-    if (!child.isMesh || !child.material) return;
-    // Three's Object3D.clone shares materials — we need our own copy per kart.
-    child.material = Array.isArray(child.material)
-      ? child.material.map(m => tintMaterial(m.clone(), tint))
-      : tintMaterial(child.material.clone(), tint);
-    child.castShadow = true;
-    if (child.userData.isWheel) wheels.push(child);
+
+  KART_LODS.forEach((cfg, i) => {
+    const tpl = kartTemplates[i];
+    if (!tpl) return;
+    const mesh = tpl.clone(true);
+    mesh.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      child.material = Array.isArray(child.material)
+        ? child.material.map(m => tintMaterial(m.clone(), tint))
+        : tintMaterial(child.material.clone(), tint);
+      child.castShadow = true;
+      if (child.userData.isWheel) wheels.push(child);
+    });
+    lod.addLevel(mesh, cfg.distance);
   });
 
-  g.userData.wheels = wheels;
-  return g;
+  lod.userData.wheels = wheels;
+  return lod;
 }
 
 function tintMaterial(mat, tint) {
