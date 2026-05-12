@@ -2,6 +2,10 @@
 gocart
 gocart.exe
 
-# Large model assets — served at runtime from models/, kept out of git.
-# Copy goCart_low.glb here as goCart.glb (or set up git-lfs).
-models/*.glb
+# Claude Code worktrees / scratch
+.claude/
+
+# Large model assets — served by the static handler, kept out of git.
+# Place goCart_{high,med,low}.glb under static/models/ at deploy time
+# (or set up git-lfs).
+static/models/*.glb
